@@ -1,0 +1,33 @@
+# ─── NODE / BACKEND ───────────────────────────────
+node_modules/
+# node_modules tiene miles de archivos descargados automáticamente
+# Pesan cientos de MB. Nunca se suben — se regeneran con "npm install"
+
+.env
+# Variables de entorno: contraseñas, claves de API, configuración sensible
+# NUNCA va al repositorio. Es el error de seguridad más común.
+
+*.log
+# Archivos de log generados automáticamente
+
+# ─── FLUTTER / DART ───────────────────────────────
+mobile/.dart_tool/
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+mobile/build/
+# Estas carpetas se generan al compilar. Pesan mucho y se regeneran solas.
+
+mobile/*.iml
+mobile/.idea/
+# Configuración del IDE — es local, no debe compartirse
+
+# ─── SISTEMA OPERATIVO ────────────────────────────
+.DS_Store
+# Archivo oculto que genera macOS en cada carpeta. Basura.
+
+Thumbs.db
+# Lo mismo pero en Windows
+
+# ─── BASE DE DATOS ────────────────────────────────
+*.sql.bak
+# Backups de SQL, no van al repo
