@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile/theme/app_theme.dart';
 import 'package:mobile/screens/auth/register_screen.dart';
 import 'package:mobile/screens/home/home_screen.dart';
+import 'package:mobile/services/auth_service.dart';
 
 class LoginScreen extends StatefulWidget {
   // StatefulWidget = widget con estado interno que puede cambiar
@@ -44,31 +45,29 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   Future<void> _iniciarSesion() async {
-    // Limpiar error anterior
-    setState(() => _errorMensaje = null);
-    // setState le dice a Flutter: "algo cambió, redibujá la pantalla"
-    // Sin setState, el cambio ocurre en memoria pero la UI no se actualiza
+    setState(() { _errorMensaje = null; _cargando = true; });
 
-    if (!_formKey.currentState!.validate()) return;
-    // validate() recorre todos los campos y ejecuta sus validadores
-    // Si alguno falla, muestra el error y devuelve false
+    if (!_formKey.currentState!.validate()) {
+      setState(() => _cargando = false);
+      return;
+    }
 
-    setState(() => _cargando = true);
-    // Activamos el indicador de carga
-
-    await Future.delayed(const Duration(milliseconds: 800));
-    // TEMPORAL: simula la espera del servidor
-    // En Sprint 7 esto se reemplaza por la llamada real con Dio
+    // Llamada real al backend
+    final resultado = await AuthService.login(
+      email:    _emailController.text.trim(),
+      password: _passwordController.text,
+    );
 
     setState(() => _cargando = false);
-
     if (!mounted) return;
-    // "mounted" = si el widget todavía está en pantalla
-    // Si el usuario navegó a otra pantalla mientras esperábamos, no hacemos nada
 
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
-    );
+    if (resultado['exito']) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+      );
+    } else {
+      setState(() => _errorMensaje = resultado['error']);
+    }
     // pushReplacement navega a HomeScreen Y elimina LoginScreen de la historia
     // El usuario no puede volver atrás con el botón "back"
     // Tiene sentido: después de loguearse no queremos que vuelva al login

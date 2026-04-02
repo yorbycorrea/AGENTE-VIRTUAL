@@ -3,6 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:mobile/theme/app_theme.dart';
 import 'package:mobile/screens/home/home_screen.dart';
+import 'package:mobile/services/auth_service.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -29,19 +30,29 @@ class _RegisterScreenState extends State<RegisterScreen> {
   }
 
   Future<void> _registrarse() async {
-    setState(() => _errorMensaje = null);
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _cargando = true);
+    setState(() { _errorMensaje = null; _cargando = true; });
 
-    await Future.delayed(const Duration(milliseconds: 800));
-    // TEMPORAL — reemplazado en Sprint 7 con Dio
+    if (!_formKey.currentState!.validate()) {
+      setState(() => _cargando = false);
+      return;
+    }
+
+    final resultado = await AuthService.registro(
+      nombre:   _nombreController.text.trim(),
+      email:    _emailController.text.trim(),
+      password: _passwordController.text,
+    );
 
     setState(() => _cargando = false);
     if (!mounted) return;
 
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
-    );
+    if (resultado['exito']) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const HomeScreen()),
+      );
+    } else {
+      setState(() => _errorMensaje = resultado['error']);
+    }
   }
 
   @override

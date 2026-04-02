@@ -5,6 +5,10 @@ import 'package:intl/intl.dart';
 import 'package:mobile/models/tarea.dart';
 import 'package:mobile/theme/app_theme.dart';
 import 'package:mobile/screens/home/widgets/tarea_card.dart';
+import 'package:mobile/services/tareas_service.dart';
+import 'package:mobile/services/auth_service.dart';
+import 'package:mobile/services/storage_service.dart';
+import 'package:mobile/screens/auth/login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -17,54 +21,45 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   // SingleTickerProviderStateMixin es necesario para usar TabController (las pestañas)
 
   late TabController _tabController;
-  // "late" = le prometemos a Dart que esto se inicializará antes de usarse
-  // Se usa cuando no podemos inicializar en la declaración (necesitamos context primero)
 
-  String _filtroEstado = 'todas';
-
-  // ── Datos de prueba (se reemplazan con datos reales en Sprint 7) ─────────
-  final List<Tarea> _tareas = [
-    Tarea(
-      id: 1, usuarioId: 1,
-      titulo: 'Llamar al médico',
-      descripcion: 'Turno de control anual',
-      prioridad: 'alta',
-      fechaLimite: DateTime.now(),
-      creadaEn: DateTime.now(),
-    ),
-    Tarea(
-      id: 2, usuarioId: 1,
-      titulo: 'Comprar víveres',
-      prioridad: 'media',
-      fechaLimite: DateTime.now(),
-      creadaEn: DateTime.now(),
-    ),
-    Tarea(
-      id: 3, usuarioId: 1,
-      titulo: 'Revisar emails del trabajo',
-      prioridad: 'baja',
-      fechaLimite: DateTime.now().add(const Duration(days: 1)),
-      creadaEn: DateTime.now(),
-      diasPospuesta: 2,
-    ),
-    Tarea(
-      id: 4, usuarioId: 1,
-      titulo: 'Pagar facturas',
-      descripcion: 'Luz, internet y seguro',
-      prioridad: 'alta',
-      estado: 'completada',
-      fechaLimite: DateTime.now(),
-      creadaEn: DateTime.now(),
-    ),
-  ];
+  String _filtroEstado  = 'todas';
+  bool   _cargando      = true;
+  String _nombreUsuario = '';
+  List<Tarea> _tareas   = [];
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    // initState se ejecuta UNA SOLA VEZ cuando el widget se crea
-    // Es el equivalente a useEffect(() => {}, []) en React
-    // Acá inicializamos cosas que dependen del ciclo de vida del widget
+    _cargarDatos();
+    // Cargamos datos reales del backend al iniciar la pantalla
+  }
+
+  Future<void> _cargarDatos() async {
+    // Cargamos el nombre del usuario guardado en el dispositivo
+    final usuario = await StorageService.obtenerUsuario();
+    setState(() => _nombreUsuario = usuario?['nombre'] ?? 'Usuario');
+
+    try {
+      final tareas = await TareasService.obtenerTareas();
+      setState(() { _tareas = tareas; _cargando = false; });
+    } catch (e) {
+      setState(() => _cargando = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Error al cargar tareas. ¿El servidor está corriendo?'),
+          backgroundColor: AppTheme.peligro, behavior: SnackBarBehavior.floating),
+        );
+      }
+    }
+  }
+
+  Future<void> _cerrarSesion() async {
+    await AuthService.logout();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => const LoginScreen()),
+    );
   }
 
   @override
@@ -89,42 +84,56 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   int get _totalHoy       => _tareas.length;
   double get _progreso    => _totalHoy == 0 ? 0 : _completadasHoy / _totalHoy;
 
-  void _completarTarea(int id) {
-    setState(() {
-      final tarea = _tareas.firstWhere((t) => t.id == id);
-      tarea.estado = tarea.estaCompletada ? 'pendiente' : 'completada';
-      // Toggle: si estaba completada, la reabre; si estaba pendiente, la completa
-    });
+  Future<void> _completarTarea(int id) async {
+    final tarea = _tareas.firstWhere((t) => t.id == id);
+    final nuevoEstado = tarea.estaCompletada ? 'pendiente' : 'completada';
+    try {
+      final actualizada = await TareasService.cambiarEstado(id, nuevoEstado);
+      setState(() {
+        final index = _tareas.indexWhere((t) => t.id == id);
+        _tareas[index] = actualizada;
+      });
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error al actualizar la tarea'),
+        backgroundColor: AppTheme.peligro, behavior: SnackBarBehavior.floating),
+      );
+    }
   }
 
-  void _posponerTarea(int id) {
-    setState(() {
-      final tarea = _tareas.firstWhere((t) => t.id == id);
-      tarea.fechaLimite = tarea.fechaLimite?.add(const Duration(days: 1))
-                          ?? DateTime.now().add(const Duration(days: 1));
-      tarea.diasPospuesta++;
-      tarea.estado = 'pospuesta';
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('Tarea pospuesta al mañana'),
-        backgroundColor: AppTheme.advertencia,
-        behavior: SnackBarBehavior.floating,
-        // floating = la snackbar flota sobre el contenido en lugar de estar pegada abajo
-      ),
-    );
+  Future<void> _posponerTarea(int id) async {
+    try {
+      final actualizada = await TareasService.cambiarEstado(id, 'pospuesta');
+      setState(() {
+        final index = _tareas.indexWhere((t) => t.id == id);
+        _tareas[index] = actualizada;
+      });
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tarea pospuesta al mañana'),
+        backgroundColor: AppTheme.advertencia, behavior: SnackBarBehavior.floating),
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error al posponer la tarea'),
+        backgroundColor: AppTheme.peligro, behavior: SnackBarBehavior.floating),
+      );
+    }
   }
 
-  void _eliminarTarea(int id) {
-    setState(() => _tareas.removeWhere((t) => t.id == id));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Text('Tarea eliminada'),
-        backgroundColor: AppTheme.peligro,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+  Future<void> _eliminarTarea(int id) async {
+    try {
+      await TareasService.eliminarTarea(id);
+      setState(() => _tareas.removeWhere((t) => t.id == id));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Tarea eliminada'),
+        backgroundColor: AppTheme.peligro, behavior: SnackBarBehavior.floating),
+      );
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error al eliminar la tarea'),
+        backgroundColor: AppTheme.peligro, behavior: SnackBarBehavior.floating),
+      );
+    }
   }
 
   void _mostrarFormularioNuevaTarea() {
@@ -161,33 +170,20 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 hintText: '¿Qué necesitás hacer?',
                 prefixIcon: Icon(Icons.add_task_rounded),
               ),
-              onSubmitted: (value) {
+              onSubmitted: (value) async {
                 if (value.trim().isEmpty) return;
-                setState(() {
-                  _tareas.insert(0, Tarea(
-                    id: DateTime.now().millisecondsSinceEpoch,
-                    // ID temporal usando timestamp — se reemplaza con el ID real del backend en Sprint 7
-                    usuarioId: 1,
-                    titulo: value.trim(),
-                    creadaEn: DateTime.now(),
-                  ));
-                });
                 Navigator.pop(ctx);
+                final nueva = await TareasService.crearTarea(titulo: value.trim());
+                setState(() => _tareas.insert(0, nueva));
               },
             ),
             const SizedBox(height: 16),
             ElevatedButton(
-              onPressed: () {
+              onPressed: () async {
                 if (tituloController.text.trim().isEmpty) return;
-                setState(() {
-                  _tareas.insert(0, Tarea(
-                    id: DateTime.now().millisecondsSinceEpoch,
-                    usuarioId: 1,
-                    titulo: tituloController.text.trim(),
-                    creadaEn: DateTime.now(),
-                  ));
-                });
                 Navigator.pop(ctx);
+                final nueva = await TareasService.crearTarea(titulo: tituloController.text.trim());
+                setState(() => _tareas.insert(0, nueva));
               },
               child: const Text('Agregar tarea'),
             ),
@@ -205,6 +201,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     // 'd'    = número del día
     // 'MMMM' = nombre completo del mes
     // Resultado: "lunes 29 de marzo"
+
+    if (_cargando) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(color: AppTheme.primario)),
+      );
+    }
 
     return Scaffold(
       body: SafeArea(
@@ -229,21 +231,24 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '¡Hola! 👋',
+                              '¡Hola, $_nombreUsuario! 👋',
                               style: Theme.of(context).textTheme.headlineMedium,
                             ),
                             Text(
                               hoy.substring(0, 1).toUpperCase() + hoy.substring(1),
-                              // Capitaliza la primera letra
                               style: Theme.of(context).textTheme.bodyLarge,
                             ),
                           ],
                         ),
-                        // ── Avatar ────────────────────────────────────
-                        CircleAvatar(
-                          backgroundColor: AppTheme.primario,
-                          child: const Text('U', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                          // En Sprint 7 mostramos la inicial del nombre real del usuario
+                        GestureDetector(
+                          onTap: _cerrarSesion,
+                          child: CircleAvatar(
+                            backgroundColor: AppTheme.primario,
+                            child: Text(
+                              _nombreUsuario.isNotEmpty ? _nombreUsuario[0].toUpperCase() : 'U',
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                            ),
+                          ),
                         ),
                       ],
                     ),
