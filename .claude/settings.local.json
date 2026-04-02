@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/yorby -maxdepth 4 -type d \\\\\\(-iname *app* -o -iname *project* \\\\\\))"
+    ]
+  }
+}

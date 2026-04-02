@@ -1,0 +1,22 @@
+### Registrar usuario
+POST http://localhost:3000/api/auth/registro
+Content-Type: application/json
+
+{
+  "nombre": "admin",
+  "email": "admin@gmail.com",
+  "password": "123456"
+}
+
+### Login
+POST http://localhost:3000/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "admin@gmail.com",
+  "password": "123456"
+}
+
+### Ver perfil (reemplazá TOKEN con el que te devolvió el login)
+GET http://localhost:3000/api/auth/perfil
+Authorization: Bearer TOKEN
