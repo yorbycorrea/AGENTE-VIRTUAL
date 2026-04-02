@@ -10,8 +10,9 @@ const cors    = require('cors');
 require('dotenv').config();
 // dotenv debe cargarse PRIMERO — antes de cualquier cosa que use process.env
 
-const { verificarConexion } = require('./db/connection');
-const crearTablas           = require('./db/schema');
+const { verificarConexion }    = require('./db/connection');
+const crearTablas              = require('./db/schema');
+const iniciarJobRecordatorios  = require('./jobs/recordatorios.job');
 
 // ─── CREAR LA APP ─────────────────────────────────────────────────────────────
 const app  = express();
@@ -105,6 +106,9 @@ const iniciarServidor = async () => {
   await crearTablas();
   // Paso 2: crear las tablas si no existen
   // Solo crea las que faltan — no toca datos existentes
+
+  iniciarJobRecordatorios();
+  // Inicia el cron que revisa recordatorios cada minuto
 
   app.listen(PORT, () => {
     console.log(`✓ Servidor corriendo en http://localhost:${PORT}`);

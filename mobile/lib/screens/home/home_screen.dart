@@ -9,6 +9,7 @@ import 'package:mobile/services/tareas_service.dart';
 import 'package:mobile/services/auth_service.dart';
 import 'package:mobile/services/storage_service.dart';
 import 'package:mobile/screens/auth/login_screen.dart';
+import 'package:mobile/screens/home/widgets/nueva_tarea_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -136,61 +137,21 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
-  void _mostrarFormularioNuevaTarea() {
-    final tituloController = TextEditingController();
-
-    showModalBottomSheet(
+  Future<void> _mostrarFormularioNuevaTarea() async {
+    final tarea = await showModalBottomSheet<dynamic>(
       context: context,
       isScrollControlled: true,
-      // isScrollControlled: true = el bottom sheet puede ocupar más del 50% de la pantalla
-      // Necesario para que el teclado no tape el contenido
       backgroundColor: AppTheme.fondoTarjetaOscuro,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(
-          left: 24, right: 24, top: 24,
-          bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
-          // viewInsets.bottom = altura del teclado
-          // Sumamos ese valor al padding para que el contenido suba con el teclado
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          // MainAxisSize.min = la columna ocupa solo el espacio necesario
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Nueva tarea', style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 16),
-            TextField(
-              controller: tituloController,
-              autofocus: true,
-              // autofocus: true = el teclado aparece automáticamente
-              decoration: const InputDecoration(
-                hintText: '¿Qué necesitás hacer?',
-                prefixIcon: Icon(Icons.add_task_rounded),
-              ),
-              onSubmitted: (value) async {
-                if (value.trim().isEmpty) return;
-                Navigator.pop(ctx);
-                final nueva = await TareasService.crearTarea(titulo: value.trim());
-                setState(() => _tareas.insert(0, nueva));
-              },
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () async {
-                if (tituloController.text.trim().isEmpty) return;
-                Navigator.pop(ctx);
-                final nueva = await TareasService.crearTarea(titulo: tituloController.text.trim());
-                setState(() => _tareas.insert(0, nueva));
-              },
-              child: const Text('Agregar tarea'),
-            ),
-          ],
-        ),
-      ),
+      builder: (_) => const NuevaTareaSheet(),
     );
+
+    // Si el usuario guardó la tarea (no canceló), la agregamos a la lista
+    if (tarea != null && tarea is Tarea) {
+      setState(() => _tareas.insert(0, tarea));
+    }
   }
 
   @override

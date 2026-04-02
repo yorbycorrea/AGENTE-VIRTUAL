@@ -13,6 +13,10 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
+        // Desugaring permite usar APIs modernas de Java (como java.time)
+        // en versiones antiguas de Android. flutter_local_notifications lo requiere
+        // para manejar fechas y alarmas exactas correctamente.
     }
 
     kotlinOptions {
@@ -41,4 +45,10 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // Librería que provee las APIs modernas de Java para Android antiguo
+    // Sin esto, isCoreLibraryDesugaringEnabled = true no tiene efecto
 }

@@ -32,9 +32,14 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.8
   google_fonts: ^6.2.1       # tipografías de Google (Poppins, Inter, etc.)
-  intl: ^0.19.0              # formateo de fechas y números
+  intl: ^0.20.2              # formateo de fechas y números
   shared_preferences: ^2.3.2 # guardar datos simples (token JWT) en el dispositivo
-  dio: ^5.7.0                # cliente HTTP para conectarse al backend (Sprint 7)
+  dio: ^5.7.0                # cliente HTTP para conectarse al backend
+  flutter_localizations:     # traducciones para DatePicker, AlertDialog, etc.
+    sdk: flutter
+  flutter_local_notifications: ^18.0.1  # notificaciones locales del dispositivo
+  timezone: ^0.9.4                      # zonas horarias (requerido por notificaciones)
+  permission_handler: ^11.3.1           # pedir permisos de notificación al usuario
 
 dev_dependencies:
   flutter_test:
