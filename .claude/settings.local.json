@@ -14,7 +14,8 @@
       "Bash(find C:UsersyorbyAppDataLocalPubCachehostedpub.devwindow_manager-0.3.9 -name *.dart)",
       "Bash(find C:UsersyorbyAppDataLocalPubCachehostedpub.devdesktop_multi_window-0.3.0 -name *.cpp -o -name *.h)",
       "Bash(flutter build:*)",
-      "Bash(find /c/Users/yorby/OneDrive/Documentos/App/mobile -name *notif* -o -name *record* -o -name *alarm*)"
+      "Bash(find /c/Users/yorby/OneDrive/Documentos/App/mobile -name *notif* -o -name *record* -o -name *alarm*)",
+      "Bash(dart analyze:*)"
     ]
   }
 }
