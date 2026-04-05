@@ -1,5 +1,7 @@
 // screens/home/home_screen.dart
 
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:mobile/models/tarea.dart';
@@ -10,6 +12,12 @@ import 'package:mobile/services/auth_service.dart';
 import 'package:mobile/services/storage_service.dart';
 import 'package:mobile/screens/auth/login_screen.dart';
 import 'package:mobile/screens/home/widgets/nueva_tarea_sheet.dart';
+import 'package:mobile/screens/estadisticas/estadisticas_screen.dart';
+import 'package:mobile/screens/home/widgets/mayordomo_widget.dart';
+import 'package:mobile/screens/calendario/calendario_screen.dart';
+import 'package:mobile/screens/personajes/seleccion_personaje_screen.dart';
+import 'package:mobile/services/agente_service.dart';
+import 'package:mobile/windows/notificacion_windows.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -23,6 +31,15 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   late TabController _tabController;
 
+  int    _paginaActual  = 0;
+  // 0 = Tareas, 1 = Estadísticas
+
+  // GlobalKey: referencia directa al State del Mayordomo.
+  // currentState?.mostrarMensaje(...) funciona sin importar cuántas veces
+  // Flutter haya reconstruido el widget — la key siempre apunta al mismo State.
+  final _mayordomoKey = GlobalKey<MayordomoWidgetState>();
+  final Map<int, Timer> _timersRecordatorio = {};
+  // Un Timer por tarea — se dispara a la hora del recordatorio
   String _filtroEstado  = 'todas';
   bool   _cargando      = true;
   String _nombreUsuario = '';
@@ -31,9 +48,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 3, vsync: this); // tabs de filtro de tareas
     _cargarDatos();
-    // Cargamos datos reales del backend al iniciar la pantalla
+    // En Windows: lanzar el Agente flotante (ventana transparente separada)
+    if (Platform.isWindows) {
+      AgenteService.iniciar();
+    }
   }
 
   Future<void> _cargarDatos() async {
@@ -66,6 +86,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   @override
   void dispose() {
     _tabController.dispose();
+    for (final t in _timersRecordatorio.values) t.cancel();
     super.dispose();
   }
 
@@ -92,7 +113,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       final actualizada = await TareasService.cambiarEstado(id, nuevoEstado);
       setState(() {
         final index = _tareas.indexWhere((t) => t.id == id);
-        _tareas[index] = actualizada;
+        // Nueva lista para que didUpdateWidget detecte el cambio de estado
+        _tareas = List.from(_tareas)..[index] = actualizada;
       });
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
@@ -137,54 +159,399 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
-  Future<void> _mostrarFormularioNuevaTarea() async {
-    final tarea = await showModalBottomSheet<dynamic>(
+  // ── Programa el Mayordomo para recordar una tarea en su hora ────────────
+  void _programarRecordatorioMayordomo(Tarea tarea) {
+    if (!Platform.isWindows) return;
+
+    if (tarea.fechaLimite == null || tarea.horaLimite == null) return;
+
+    final partes = tarea.horaLimite!.split(':');
+    final hora   = int.parse(partes[0]);
+    final minuto = int.parse(partes[1]);
+
+    final horaExacta = DateTime(
+      tarea.fechaLimite!.year,
+      tarea.fechaLimite!.month,
+      tarea.fechaLimite!.day,
+      hora,
+      minuto,
+    );
+
+    final ahora = DateTime.now();
+
+    // Cancelamos timers anteriores para esta tarea
+    _timersRecordatorio[tarea.id]?.cancel();
+    _timersRecordatorio[tarea.id * 1000]?.cancel();
+
+    // Timer 1: Aviso 15 minutos antes (si aún no pasó)
+    final horaAviso15 = horaExacta.subtract(const Duration(minutes: 15));
+    if (horaAviso15.isAfter(ahora)) {
+      final demora = horaAviso15.difference(ahora);
+      _timersRecordatorio[tarea.id] = Timer(demora, () async {
+        NotificacionWindows.recordatorio(
+          'Recordatorio',
+          'En 15 minutos tiene pendiente: ${tarea.titulo}',
+        );
+        await AgenteService.mostrarMensaje(
+          'Señor/a, en 15 minutos tiene\npendiente: "${tarea.titulo}"',
+        );
+      });
+    }
+
+    // Timer 2: Aviso en el momento exacto (si aún no pasó)
+    if (horaExacta.isAfter(ahora)) {
+      final demora = horaExacta.difference(ahora);
+      _timersRecordatorio[tarea.id * 1000] = Timer(demora, () async {
+        NotificacionWindows.recordatorio('Es hora!', tarea.titulo);
+        // NO llamamos AgenteService.saludar() para no sobreescribir el mensaje.
+        await AgenteService.mostrarMensaje('¡Es hora!\n"${tarea.titulo}"');
+      });
+    }
+  }
+
+  // ── Abre NuevaTareaSheet adaptado a la plataforma ────────────────────────
+  // En móvil: BottomSheet (desliza desde abajo, patrón nativo)
+  // En escritorio: Dialog centrado (los BottomSheets no funcionan en Windows)
+  Future<dynamic> _abrirFormulario({Tarea? tareaInicial}) {
+    final sheet = NuevaTareaSheet(tareaInicial: tareaInicial);
+
+    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+      // Dialog de escritorio: ancho fijo, centrado, con scroll
+      return showDialog<dynamic>(
+        context: context,
+        builder: (ctx) => Dialog(
+          backgroundColor: AppTheme.fondoTarjetaOscuro,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          child: SizedBox(
+            width: 480,
+            // Altura máxima: 85% de la pantalla para que no tape todo
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.85,
+              ),
+              child: sheet,
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Móvil: el BottomSheet original
+    return showModalBottomSheet<dynamic>(
       context: context,
       isScrollControlled: true,
       backgroundColor: AppTheme.fondoTarjetaOscuro,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (_) => const NuevaTareaSheet(),
+      builder: (_) => sheet,
     );
+  }
 
-    // Si el usuario guardó la tarea (no canceló), la agregamos a la lista
+  Future<void> _mostrarFormularioNuevaTarea() async {
+    final tarea = await _abrirFormulario();
+
     if (tarea != null && tarea is Tarea) {
-      setState(() => _tareas.insert(0, tarea));
+      // Nueva lista (no mutación) para que didUpdateWidget en MayordomoWidget
+      // detecte el cambio al comparar widget.tareas vs oldWidget.tareas
+      setState(() => _tareas = [tarea, ..._tareas]);
+
+      // addPostFrameCallback = ejecutar DESPUÉS de que el frame actual termine.
+      // Si llamamos mostrarMensaje mientras HomeScreen está reconstruyendo,
+      // Flutter puede descartar el setState interno del Mayordomo.
+      // Con postFrameCallback esperamos a que todo esté pintado antes de actuar.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (tarea.horaLimite != null) {
+          final partes  = tarea.horaLimite!.split(':');
+          final horaStr = '${partes[0]}:${partes[1]}';
+          if (Platform.isWindows) {
+            final msg = 'Entendido. Le recordaré "${tarea.titulo}" a las $horaStr.';
+            AgenteService.mostrarMensaje(msg);
+            NotificacionWindows.hablar(msg);
+          } else {
+            _mayordomoKey.currentState?.mostrarMensaje(
+              'Entendido. Le recordaré "${tarea.titulo}" a las $horaStr.',
+            );
+          }
+          _programarRecordatorioMayordomo(tarea);
+        } else {
+          if (Platform.isWindows) {
+            final msg = 'Tarea registrada. A por ella!';
+            AgenteService.mostrarMensaje(msg);
+            NotificacionWindows.hablar(msg);
+          } else {
+            _mayordomoKey.currentState?.mostrarMensaje(
+              'Tarea registrada. ¡A por ella, señor/a!',
+            );
+          }
+        }
+      });
+    }
+  }
+
+  Future<void> _editarTarea(Tarea tareaActual) async {
+    final tareaEditada = await _abrirFormulario(tareaInicial: tareaActual);
+    if (tareaEditada != null && tareaEditada is Tarea) {
+      setState(() {
+        final index = _tareas.indexWhere((t) => t.id == tareaEditada.id);
+        if (index != -1) _tareas[index] = tareaEditada;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final hoy = DateFormat('EEEE d MMMM', 'es').format(DateTime.now());
-    // DateFormat del paquete intl — formatea fechas
-    // 'EEEE' = nombre completo del día (lunes, martes...)
-    // 'd'    = número del día
-    // 'MMMM' = nombre completo del mes
-    // Resultado: "lunes 29 de marzo"
-
     if (_cargando) {
       return const Scaffold(
         body: Center(child: CircularProgressIndicator(color: AppTheme.primario)),
       );
     }
 
-    return Scaffold(
-      body: SafeArea(
-        child: CustomScrollView(
-          // CustomScrollView = scroll avanzado que permite mezclar distintos tipos de contenido
-          slivers: [
-            // Un "sliver" es una porción del scroll. Permite crear efectos como
-            // el AppBar que se colapsa al hacer scroll (SliverAppBar)
+    // LayoutBuilder nos da el ancho disponible en tiempo real.
+    // En móvil será ~360-430px, en escritorio Windows 800-1920px.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final esEscritorio = constraints.maxWidth >= 720;
+        // 720px es el punto de quiebre — debajo es móvil, arriba es escritorio
 
-            // ── Header con saludo y progreso ──────────────────────────
-            SliverToBoxAdapter(
-              // SliverToBoxAdapter convierte un widget normal en un sliver
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+        return esEscritorio
+          ? _buildLayoutEscritorio()
+          : _buildLayoutMovil();
+      },
+    );
+  }
+
+  // ── Layout móvil (el original) ────────────────────────────────────────────
+  Widget _buildLayoutMovil() {
+    return Scaffold(
+      body: IndexedStack(
+        index: _paginaActual,
+        children: [
+          _buildTareasView(),
+          const EstadisticasScreen(),
+        ],
+      ),
+      floatingActionButton: _paginaActual == 0
+        ? FloatingActionButton.extended(
+            onPressed: _mostrarFormularioNuevaTarea,
+            backgroundColor: AppTheme.primario,
+            icon: const Icon(Icons.add_rounded, color: Colors.white),
+            label: const Text('Nueva tarea', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+          )
+        : null,
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _paginaActual,
+        onTap: (index) => setState(() => _paginaActual = index),
+        backgroundColor: AppTheme.fondoTarjetaOscuro,
+        selectedItemColor: AppTheme.primario,
+        unselectedItemColor: Colors.white38,
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.checklist_rounded),  label: 'Tareas'),
+          BottomNavigationBarItem(icon: Icon(Icons.bar_chart_rounded),   label: 'Progreso'),
+        ],
+      ),
+    );
+  }
+
+  // ── Layout escritorio (dos columnas) ─────────────────────────────────────
+  // El Agente Desktop ahora flota FUERA de esta ventana (ventana transparente
+  // separada, lanzada por AgenteService.iniciar()). No hay overlay dentro.
+  Widget _buildLayoutEscritorio() {
+    return Scaffold(
+      body: Row(
+        children: [
+          _buildBarraLateral(),
+          const VerticalDivider(width: 1, color: Colors.white10),
+          Expanded(
+            child: IndexedStack(
+              index: _paginaActual,
+              children: [
+                _buildTareasView(esEscritorio: true),
+                const EstadisticasScreen(),
+                const CalendarioScreen(),
+                const SeleccionPersonajeScreen(),
+              ],
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: _paginaActual == 0
+        ? FloatingActionButton.extended(
+            onPressed: _mostrarFormularioNuevaTarea,
+            backgroundColor: AppTheme.primario,
+            icon: const Icon(Icons.add_rounded, color: Colors.white),
+            label: const Text('Nueva tarea', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+          )
+        : null,
+    );
+  }
+
+  // ── Barra lateral del layout de escritorio ────────────────────────────────
+  Widget _buildBarraLateral() {
+    final hoy = DateFormat('EEEE d\nMMMM', 'es').format(DateTime.now());
+    // '\n' = salto de línea para mostrar día y mes en dos líneas
+
+    return Container(
+      width: 220,
+      color: AppTheme.fondoTarjetaOscuro,
+      padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+
+          // ── Avatar y nombre ──────────────────────────────────────────
+          Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: AppTheme.primario,
+                radius: 20,
+                child: Text(
+                  _nombreUsuario.isNotEmpty ? _nombreUsuario[0].toUpperCase() : 'U',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _nombreUsuario,
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Text(
+              hoy[0].toUpperCase() + hoy.substring(1),
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── Progreso rápido ──────────────────────────────────────────
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppTheme.primario.withOpacity(0.15),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppTheme.primario.withOpacity(0.3)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$_completadasHoy / $_totalHoy tareas',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: LinearProgressIndicator(
+                    value: _progreso,
+                    minHeight: 6,
+                    backgroundColor: Colors.white10,
+                    valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.primario),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${(_progreso * 100).toInt()}% completado',
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // ── Ítems de navegación ──────────────────────────────────────
+          _buildNavItem(icono: Icons.checklist_rounded,      label: 'Tareas',      indice: 0),
+          const SizedBox(height: 4),
+          _buildNavItem(icono: Icons.calendar_month_rounded, label: 'Calendario',  indice: 2),
+          const SizedBox(height: 4),
+          _buildNavItem(icono: Icons.bar_chart_rounded,      label: 'Progreso',    indice: 1),
+          const SizedBox(height: 4),
+          _buildNavItem(icono: Icons.person_rounded,         label: 'Asistente',   indice: 3),
+
+          const Spacer(),
+
+          const SizedBox(height: 16),
+
+          // ── Cerrar sesión ────────────────────────────────────────────
+          GestureDetector(
+            onTap: _cerrarSesion,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppTheme.peligro.withOpacity(0.4)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.logout_rounded, color: AppTheme.peligro, size: 18),
+                  SizedBox(width: 8),
+                  Text('Cerrar sesión', style: TextStyle(color: AppTheme.peligro, fontSize: 13)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavItem({required IconData icono, required String label, required int indice}) {
+    final activo = _paginaActual == indice;
+    return GestureDetector(
+      onTap: () => setState(() => _paginaActual = indice),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: activo ? AppTheme.primario.withOpacity(0.15) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          children: [
+            Icon(icono, color: activo ? AppTheme.primario : Colors.white38, size: 20),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                color: activo ? AppTheme.primario : Colors.white54,
+                fontWeight: activo ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // esEscritorio se pasa desde el layout padre (build → LayoutBuilder),
+  // NO lo detectamos aquí dentro para evitar leer el ancho incorrecto
+  // (la columna derecha tiene menos ancho que la pantalla completa).
+  Widget _buildTareasView({bool esEscritorio = false}) {
+    final hoy = DateFormat('EEEE d MMMM', 'es').format(DateTime.now());
+
+    return SafeArea(
+      child: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+
+                  // ── Header (saludo + progreso) — solo en móvil ─────
+                  if (!esEscritorio) ...[
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
@@ -213,79 +580,74 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         ),
                       ],
                     ),
-
                     const SizedBox(height: 24),
-
-                    // ── Tarjeta de progreso del día ────────────────────
                     _buildTarjetaProgreso(context),
-
                     const SizedBox(height: 24),
-
-                    // ── Tabs de filtro ─────────────────────────────────
-                    Container(
-                      decoration: BoxDecoration(
-                        color: AppTheme.fondoTarjetaOscuro,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: TabBar(
-                        controller: _tabController,
-                        onTap: (index) {
-                          setState(() {
-                            _filtroEstado = ['todas', 'pendientes', 'completadas'][index];
-                          });
-                        },
-                        indicator: BoxDecoration(
-                          color: AppTheme.primario,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        indicatorSize: TabBarIndicatorSize.tab,
-                        dividerColor: Colors.transparent,
-                        labelColor: Colors.white,
-                        unselectedLabelColor: Colors.white38,
-                        tabs: const [
-                          Tab(text: 'Todas'),
-                          Tab(text: 'Pendientes'),
-                          Tab(text: 'Completadas'),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 20),
                   ],
-                ),
-              ),
-            ),
 
-            // ── Lista de tareas ────────────────────────────────────────
-            _tareasFiltradas.isEmpty
-              ? SliverFillRemaining(child: _buildEstadoVacio())
-              : SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 100),
-                  sliver: SliverList(
-                    delegate: SliverChildBuilderDelegate(
-                      (context, index) {
-                        final tarea = _tareasFiltradas[index];
-                        return TareaCard(
-                          tarea: tarea,
-                          onCompletar: () => _completarTarea(tarea.id),
-                          onPosponer:  () => _posponerTarea(tarea.id),
-                          onEliminar:  () => _eliminarTarea(tarea.id),
-                        );
+                  // ── Título de sección en escritorio ────────────────
+                  if (esEscritorio) ...[
+                    Text('Mis tareas', style: Theme.of(context).textTheme.headlineSmall),
+                    const SizedBox(height: 16),
+                  ],
+
+                  // ── Tabs de filtro ─────────────────────────────────
+                  Container(
+                    decoration: BoxDecoration(
+                      color: AppTheme.fondoTarjetaOscuro,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: TabBar(
+                      controller: _tabController,
+                      onTap: (index) {
+                        setState(() {
+                          _filtroEstado = ['todas', 'pendientes', 'completadas'][index];
+                        });
                       },
-                      childCount: _tareasFiltradas.length,
+                      indicator: BoxDecoration(
+                        color: AppTheme.primario,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      indicatorSize: TabBarIndicatorSize.tab,
+                      dividerColor: Colors.transparent,
+                      labelColor: Colors.white,
+                      unselectedLabelColor: Colors.white38,
+                      tabs: const [
+                        Tab(text: 'Todas'),
+                        Tab(text: 'Pendientes'),
+                        Tab(text: 'Completadas'),
+                      ],
                     ),
                   ),
-                ),
-          ],
-        ),
-      ),
 
-      // ── Botón agregar tarea ──────────────────────────────────────────
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _mostrarFormularioNuevaTarea,
-        backgroundColor: AppTheme.primario,
-        icon: const Icon(Icons.add_rounded, color: Colors.white),
-        label: const Text('Nueva tarea', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 20),
+                ],
+              ),
+            ),
+          ),
+
+          // ── Lista de tareas ────────────────────────────────────────
+          _tareasFiltradas.isEmpty
+            ? SliverFillRemaining(child: _buildEstadoVacio())
+            : SliverPadding(
+                padding: const EdgeInsets.fromLTRB(24, 0, 24, 100),
+                sliver: SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                      final tarea = _tareasFiltradas[index];
+                      return TareaCard(
+                        tarea: tarea,
+                        onCompletar: () => _completarTarea(tarea.id),
+                        onPosponer:  () => _posponerTarea(tarea.id),
+                        onEliminar:  () => _eliminarTarea(tarea.id),
+                        onEditar:    () => _editarTarea(tarea),
+                      );
+                    },
+                    childCount: _tareasFiltradas.length,
+                  ),
+                ),
+              ),
+        ],
       ),
     );
   }

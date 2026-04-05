@@ -14,8 +14,7 @@ class TareaCard extends StatelessWidget {
   final VoidCallback onCompletar;
   final VoidCallback onPosponer;
   final VoidCallback onEliminar;
-  // VoidCallback = tipo de Dart para una función que no recibe ni devuelve nada
-  // Equivalente a () => void en TypeScript
+  final VoidCallback onEditar;
 
   const TareaCard({
     super.key,
@@ -23,6 +22,7 @@ class TareaCard extends StatelessWidget {
     required this.onCompletar,
     required this.onPosponer,
     required this.onEliminar,
+    required this.onEditar,
   });
 
   @override
@@ -158,10 +158,16 @@ class TareaCard extends StatelessWidget {
               PopupMenuButton<String>(
                 icon: const Icon(Icons.more_vert_rounded, color: Colors.white38, size: 20),
                 onSelected: (value) {
-                  if (value == 'posponer')  onPosponer();
-                  if (value == 'eliminar')  onEliminar();
+                  if (value == 'editar')   onEditar();
+                  if (value == 'posponer') onPosponer();
+                  if (value == 'eliminar') onEliminar();
                 },
                 itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'editar', child: Row(children: [
+                    Icon(Icons.edit_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('Editar'),
+                  ])),
                   const PopupMenuItem(value: 'posponer', child: Row(children: [
                     Icon(Icons.event_repeat_rounded, size: 18), SizedBox(width: 8), Text('Posponer al mañana'),
                   ])),

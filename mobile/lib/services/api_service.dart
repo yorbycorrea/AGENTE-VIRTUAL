@@ -9,12 +9,16 @@
 //   3. Maneja errores de red de forma centralizada
 // ─────────────────────────────────────────────────────────────────────────────
 
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:mobile/services/storage_service.dart';
 
 class ApiService {
-  static const String _baseUrl = 'http://10.0.2.2:3000';
-  // 10.0.2.2 = dirección especial del emulador Android para alcanzar localhost de la PC
+  // Detectamos la plataforma para usar la URL correcta:
+  // - Android emulador: 10.0.2.2 es la IP especial que apunta al localhost de la PC
+  // - Windows/otros:    localhost apunta directamente a la propia máquina
+  static String get _baseUrl =>
+    Platform.isAndroid ? 'http://10.0.2.2:3000' : 'http://localhost:3000';
   // En producción (app publicada) esto sería tu dominio real: 'https://tuapp.com'
 
   static Dio? _instancia;
@@ -22,7 +26,6 @@ class ApiService {
   // El "?" indica que puede ser null (antes de inicializarse)
 
   static Dio get cliente {
-    // Getter que devuelve la instancia, creándola si no existe
     _instancia ??= _crearCliente();
     // ??= significa: "si _instancia es null, asignale el resultado de _crearCliente()"
     // Es equivalente a: if (_instancia == null) _instancia = _crearCliente();

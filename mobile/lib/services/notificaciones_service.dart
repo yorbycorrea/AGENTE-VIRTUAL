@@ -5,6 +5,7 @@
 // a la hora programada, aunque la app esté cerrada.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import 'dart:io';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
@@ -19,6 +20,8 @@ class NotificacionesService {
 
   // ── Inicializar (llamar una sola vez al arrancar la app) ─────────────────
   static Future<void> inicializar() async {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+    // flutter_local_notifications no soporta Windows — salimos sin hacer nada
     if (_inicializado) return;
 
     tz.initializeTimeZones();
@@ -41,7 +44,7 @@ class NotificacionesService {
 
   // ── Pedir permisos al usuario ─────────────────────────────────────────────
   static Future<bool> pedirPermisos() async {
-    // En Android 13+ el usuario debe aceptar explícitamente las notificaciones
+    if (!Platform.isAndroid && !Platform.isIOS) return false;
     final status = await Permission.notification.request();
     // .request() muestra el diálogo del sistema "¿Permitir notificaciones?"
     // Solo se muestra una vez — si el usuario deniega, hay que ir a Configuración
@@ -54,11 +57,11 @@ class NotificacionesService {
   // ── Programar un recordatorio ─────────────────────────────────────────────
   static Future<void> programarRecordatorio({
     required int id,
-    // ID único de la notificación — usamos el id de la tarea
     required String titulo,
     required String cuerpo,
     required DateTime fechaHora,
   }) async {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
     if (!_inicializado) await inicializar();
 
     // Convertimos la fecha a timezone-aware (necesario para notificaciones exactas)

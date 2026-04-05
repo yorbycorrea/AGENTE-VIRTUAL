@@ -40,6 +40,9 @@ dependencies:
   flutter_local_notifications: ^18.0.1  # notificaciones locales del dispositivo
   timezone: ^0.9.4                      # zonas horarias (requerido por notificaciones)
   permission_handler: ^11.3.1           # pedir permisos de notificación al usuario
+  window_manager: ^0.3.9               # controlar ventana Windows (transparente, sin bordes, encima)
+  desktop_multi_window: ^0.3.0         # crear ventana secundaria flotante del Agente
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:

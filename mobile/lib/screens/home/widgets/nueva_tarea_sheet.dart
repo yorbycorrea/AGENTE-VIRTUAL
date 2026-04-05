@@ -1,11 +1,8 @@
 // screens/home/widgets/nueva_tarea_sheet.dart
 // ─────────────────────────────────────────────────────────────────────────────
-// Bottom sheet completo para crear una tarea con:
-//   - Título y descripción
-//   - Prioridad (baja / media / alta)
-//   - Fecha límite (DatePicker)
-//   - Hora límite (TimePicker)
-//   - Recordatorio configurable
+// Bottom sheet para crear O editar una tarea.
+// Si recibe `tareaInicial`, entra en modo edición: pre-carga los campos
+// y llama PUT en lugar de POST al guardar.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import 'package:flutter/material.dart';
@@ -16,7 +13,10 @@ import 'package:mobile/services/notificaciones_service.dart';
 import 'package:mobile/theme/app_theme.dart';
 
 class NuevaTareaSheet extends StatefulWidget {
-  const NuevaTareaSheet({super.key});
+  final Tarea? tareaInicial;
+  // null = modo creación, una Tarea = modo edición
+
+  const NuevaTareaSheet({super.key, this.tareaInicial});
 
   @override
   State<NuevaTareaSheet> createState() => _NuevaTareaSheetState();
@@ -31,8 +31,33 @@ class _NuevaTareaSheetState extends State<NuevaTareaSheet> {
   TimeOfDay? _horaLimite;
   bool      _tieneRecordatorio      = false;
   int       _minutosAntesRecordatorio = 30;
-  // Cuántos minutos antes de la hora límite disparar el recordatorio
   bool      _guardando              = false;
+
+  bool get _esEdicion => widget.tareaInicial != null;
+  // Getter de conveniencia — true si estamos editando, false si estamos creando
+
+  @override
+  void initState() {
+    super.initState();
+    // Si viene una tarea, pre-cargamos todos los campos con sus valores actuales
+    if (_esEdicion) {
+      final t = widget.tareaInicial!;
+      _tituloController.text      = t.titulo;
+      _descripcionController.text = t.descripcion ?? '';
+      _prioridad                  = t.prioridad;
+      _fechaLimite                = t.fechaLimite;
+
+      // horaLimite viene como String "HH:MM:SS" desde el backend
+      // Necesitamos convertirlo a TimeOfDay para el picker
+      if (t.horaLimite != null) {
+        final partes = t.horaLimite!.split(':');
+        _horaLimite = TimeOfDay(
+          hour:   int.parse(partes[0]),
+          minute: int.parse(partes[1]),
+        );
+      }
+    }
+  }
 
   // Opciones de recordatorio
   final List<Map<String, dynamic>> _opcionesRecordatorio = [
@@ -97,7 +122,7 @@ class _NuevaTareaSheetState extends State<NuevaTareaSheet> {
     }
   }
 
-  // ── Guardar tarea ─────────────────────────────────────────────────────────
+  // ── Guardar tarea (crea o edita según el modo) ───────────────────────────
   Future<void> _guardarTarea() async {
     if (_tituloController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -110,34 +135,50 @@ class _NuevaTareaSheetState extends State<NuevaTareaSheet> {
     setState(() => _guardando = true);
 
     try {
-      // Construimos la hora límite como String para el backend
+      // Convertimos TimeOfDay → String "HH:MM:00" para el backend
       String? horaString;
       if (_horaLimite != null) {
         horaString =
           '${_horaLimite!.hour.toString().padLeft(2, '0')}:'
           '${_horaLimite!.minute.toString().padLeft(2, '0')}:00';
-        // padLeft(2, '0') → si es 9, devuelve "09" (siempre 2 dígitos)
       }
 
-      // Crear la tarea en el backend
-      final tarea = await TareasService.crearTarea(
-        titulo:              _tituloController.text.trim(),
-        descripcion:         _descripcionController.text.trim().isEmpty
-                               ? null
-                               : _descripcionController.text.trim(),
-        prioridad:           _prioridad,
-        fechaLimite:         _fechaLimite,
-        horaLimite:          horaString,
-        posponerAutomatico:  false,
-      );
+      final datos = {
+        'titulo':       _tituloController.text.trim(),
+        'descripcion':  _descripcionController.text.trim().isEmpty
+                          ? null
+                          : _descripcionController.text.trim(),
+        'prioridad':    _prioridad,
+        'fecha_limite': _fechaLimite?.toIso8601String().split('T')[0],
+        'hora_limite':  horaString,
+        'posponer_automatico': false,
+      };
 
-      // Si tiene recordatorio, fecha y hora → programar notificación
-      if (_tieneRecordatorio && _fechaLimite != null && _horaLimite != null) {
-        await _programarNotificacion(tarea);
+      Tarea tarea;
+
+      if (_esEdicion) {
+        // ── Modo edición: llamamos PUT /api/tareas/:id ────────────────
+        tarea = await TareasService.editarTarea(widget.tareaInicial!.id, datos);
+      } else {
+        // ── Modo creación: llamamos POST /api/tareas ───────────────────
+        tarea = await TareasService.crearTarea(
+          titulo:             datos['titulo'] as String,
+          descripcion:        datos['descripcion'] as String?,
+          prioridad:          datos['prioridad'] as String,
+          fechaLimite:        _fechaLimite,
+          horaLimite:         horaString,
+          posponerAutomatico: false,
+        );
+
+        // Las notificaciones solo se programan al crear (no al editar,
+        // para no duplicar alarmas existentes)
+        if (_tieneRecordatorio && _fechaLimite != null && _horaLimite != null) {
+          await _programarNotificacion(tarea);
+        }
       }
 
       if (mounted) Navigator.pop(context, tarea);
-      // Devolvemos la tarea al Home para que la agregue a la lista
+      // Devolvemos la tarea actualizada al Home para que actualice la lista
 
     } catch (e) {
       setState(() => _guardando = false);
@@ -205,7 +246,10 @@ class _NuevaTareaSheetState extends State<NuevaTareaSheet> {
             ),
           ),
 
-          Text('Nueva tarea', style: Theme.of(context).textTheme.titleLarge),
+          Text(
+            _esEdicion ? 'Editar tarea' : 'Nueva tarea',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
           const SizedBox(height: 20),
 
           // ── Título ──────────────────────────────────────────────────
@@ -439,7 +483,7 @@ class _NuevaTareaSheetState extends State<NuevaTareaSheet> {
             child: _guardando
               ? const SizedBox(height: 20, width: 20,
                   child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
-              : const Text('Guardar tarea'),
+              : Text(_esEdicion ? 'Guardar cambios' : 'Guardar tarea'),
           ),
         ],
       ),

@@ -64,6 +64,9 @@ app.use('/api/auth', rutasAuth);
 const rutasTareas = require('./routes/tareas');
 app.use('/api/tareas', rutasTareas);
 
+const rutasEstadisticas = require('./routes/estadisticas');
+app.use('/api/estadisticas', rutasEstadisticas);
+
 // Se agregan a medida que avanzamos en los sprints:
 // const rutasTareas       = require('./routes/tareas');
 // const rutasCategorias   = require('./routes/categorias');

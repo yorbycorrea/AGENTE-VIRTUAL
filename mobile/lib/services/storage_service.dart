@@ -68,4 +68,17 @@ class StorageService {
     final token = await obtenerToken();
     return token != null && token.isNotEmpty;
   }
+
+  // ── Personaje del agente ─────────────────────────────────────────────────
+  static const String _keyPersonaje = 'personaje_id';
+
+  static Future<void> guardarPersonaje(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyPersonaje, id);
+  }
+
+  static Future<String> obtenerPersonaje() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keyPersonaje) ?? 'carlos';
+  }
 }

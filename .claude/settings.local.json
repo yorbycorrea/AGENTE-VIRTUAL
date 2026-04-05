@@ -2,7 +2,19 @@
   "permissions": {
     "allow": [
       "Bash(find /c/Users/yorby -maxdepth 4 -type d \\\\\\(-iname *app* -o -iname *project* \\\\\\))",
-      "Bash(npm install:*)"
+      "Bash(npm install:*)",
+      "Bash(flutter create:*)",
+      "WebFetch(domain:www.youtube.com)",
+      "WebSearch",
+      "Bash(flutter pub:*)",
+      "Bash(flutter analyze:*)",
+      "Bash(find C:UsersyorbyAppDataLocalPubCachehostedpub.dev -name *.dart -path *desktop_multi_window*)",
+      "Read(//c/Users/yorby/AppData/Local/Pub/Cache/hosted/pub.dev/desktop_multi_window-0.3.0/lib/**)",
+      "Read(//c/Users/yorby/AppData/Local/Pub/Cache/hosted/pub.dev/desktop_multi_window-0.3.0/lib/src/**)",
+      "Bash(find C:UsersyorbyAppDataLocalPubCachehostedpub.devwindow_manager-0.3.9 -name *.dart)",
+      "Bash(find C:UsersyorbyAppDataLocalPubCachehostedpub.devdesktop_multi_window-0.3.0 -name *.cpp -o -name *.h)",
+      "Bash(flutter build:*)",
+      "Bash(find /c/Users/yorby/OneDrive/Documentos/App/mobile -name *notif* -o -name *record* -o -name *alarm*)"
     ]
   }
 }
