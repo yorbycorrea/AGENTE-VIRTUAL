@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_multi_window
   permission_handler_windows
+  rive_common
   screen_retriever
   window_manager
 )

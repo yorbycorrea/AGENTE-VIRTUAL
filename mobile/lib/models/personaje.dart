@@ -10,6 +10,8 @@ class Personaje {
   final String id;
   final String nombre;
   final String descripcion;
+  final String riveAsset;       // archivo .riv que anima este personaje
+  final String? riveArtboard;  // nombre del artboard (null = artboard por defecto)
   final Color piel;
   final Color pelo;
   final Color trajeTop;
@@ -24,6 +26,8 @@ class Personaje {
     required this.id,
     required this.nombre,
     required this.descripcion,
+    required this.riveAsset,
+    this.riveArtboard,
     required this.piel,
     required this.pelo,
     required this.trajeTop,
@@ -41,6 +45,8 @@ class Personaje {
       id: 'carlos',
       nombre: 'Carlos',
       descripcion: 'Ejecutivo elegante',
+      riveAsset: 'assets/rive/avatar_pack.riv',
+      riveArtboard: 'Avatar 1',
       piel: Color(0xFFFFD09B),
       pelo: Color(0xFF2C1A0E),
       trajeTop: Color(0xFF7C3AED),
@@ -57,6 +63,8 @@ class Personaje {
       id: 'sofia',
       nombre: 'Sofía',
       descripcion: 'Profesional moderna',
+      riveAsset: 'assets/rive/avatar_pack.riv',
+      riveArtboard: 'Avatar 2',
       piel: Color(0xFFF5D0B0),
       pelo: Color(0xFF8B4513),
       trajeTop: Color(0xFFEC4899),
@@ -73,6 +81,7 @@ class Personaje {
       id: 'max',
       nombre: 'Max',
       descripcion: 'Tech deportivo',
+      riveAsset: 'assets/rive/cute_robot.riv',
       piel: Color(0xFFE8B88A),
       pelo: Color(0xFF1A1A1A),
       trajeTop: Color(0xFF10B981),
@@ -89,6 +98,8 @@ class Personaje {
       id: 'luna',
       nombre: 'Luna',
       descripcion: 'Artista creativa',
+      riveAsset: 'assets/rive/avatar_pack.riv',
+      riveArtboard: 'Avatar 3',
       piel: Color(0xFFFFE0BD),
       pelo: Color(0xFFFF6B35),
       trajeTop: Color(0xFFF59E0B),
@@ -105,6 +116,7 @@ class Personaje {
       id: 'diego',
       nombre: 'Diego',
       descripcion: 'Nocturno misterioso',
+      riveAsset: 'assets/rive/cute_robot.riv',
       piel: Color(0xFFD4A574),
       pelo: Color(0xFF0A0A0A),
       trajeTop: Color(0xFF374151),
@@ -121,6 +133,7 @@ class Personaje {
       id: 'valentina',
       nombre: 'Valentina',
       descripcion: 'Elegante clásica',
+      riveAsset: 'assets/rive/cloud_mascot.riv',
       piel: Color(0xFFFDE8D0),
       pelo: Color(0xFF5C3317),
       trajeTop: Color(0xFF6366F1),

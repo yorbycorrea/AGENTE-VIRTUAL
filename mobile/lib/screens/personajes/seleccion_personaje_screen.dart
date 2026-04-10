@@ -9,6 +9,7 @@ import 'package:mobile/models/personaje.dart';
 import 'package:mobile/services/storage_service.dart';
 import 'package:mobile/services/agente_service.dart';
 import 'package:mobile/theme/app_theme.dart';
+import 'package:rive/rive.dart' hide LinearGradient;
 import 'dart:io';
 
 class SeleccionPersonajeScreen extends StatefulWidget {
@@ -102,11 +103,16 @@ class _SeleccionPersonajeScreenState extends State<SeleccionPersonajeScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Preview del personaje
+            // Preview del personaje con animación Rive
             SizedBox(
               width: 100,
               height: 150,
-              child: _buildMiniPersonaje(p),
+              child: RiveAnimation.asset(
+                p.riveAsset,
+                key: ValueKey('${p.riveAsset}_${p.riveArtboard}'),
+                artboard: p.riveArtboard,
+                fit: BoxFit.contain,
+              ),
             ),
             const SizedBox(height: 12),
             Text(

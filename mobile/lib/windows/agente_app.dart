@@ -18,6 +18,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile/models/personaje.dart';
 import 'package:mobile/services/storage_service.dart';
 import 'package:mobile/windows/win32_helper.dart' as win32;
+import 'package:rive/rive.dart' hide LinearGradient;
 
 class AgenteApp extends StatelessWidget {
   final WindowController controller;
@@ -95,6 +96,45 @@ class _AgenteVentanaState extends State<_AgenteVentana>
   // ── Personaje ──────────────────────────────────────────────────────────────
   Personaje _personaje = Personaje.todos[0];
 
+  // ── Rive personaje ─────────────────────────────────────────────────────────
+  // El archivo Rive viene directamente del personaje seleccionado
+  String get _riveAsset => _personaje.riveAsset;
+
+  StateMachineController? _riveSMCtrl;
+  SMITrigger?             _riveTrigSaludar;
+  SMITrigger?             _riveTrigConfundido;
+  SMITrigger?             _riveTrigFeliz;
+  SMITrigger?             _riveTrigTriste;
+  SMINumber?              _riveNumExpresion;
+
+  // ── TTS ────────────────────────────────────────────────────────────────────
+  // null = sin verificar, true = edge-tts disponible, false = solo SAPI
+  static bool? _edgeTtsDisponible;
+
+  // Proceso de reproducción activo — se mata antes de iniciar uno nuevo
+  // para evitar que dos voces suenen al mismo tiempo.
+  Process? _procesoVoz;
+
+  // Voces en español — ordenadas de más formal a más natural
+  static const _vozesId = [
+    'es-ES-AlvaroNeural',
+    'es-ES-EloyNeural',
+    'es-MX-JorgeNeural',
+    'es-AR-TomasNeural',
+    'es-US-AlonsoNeural',
+  ];
+  static const _vozesNombre = [
+    'Álvaro — Español España ★',
+    'Eloy — Español Formal',
+    'Jorge — Español México',
+    'Tomás — Español Argentina',
+    'Alonso — Español Latino',
+  ];
+  int _vozIndex = 0;
+
+  String get _vozId     => _vozesId[_vozIndex];
+  String get _vozNombre => _vozesNombre[_vozIndex];
+
   // ── Cola inter-isolate ─────────────────────────────────────────────────────
   static String? _mensajePendiente;
   static bool    _saludoPendiente    = false;
@@ -169,6 +209,9 @@ class _AgenteVentanaState extends State<_AgenteVentana>
     _registrarHandler();
     _iniciarPoll();
 
+    // Verificar edge-tts en paralelo con la aparición
+    _verificarEdgeTts();
+
     // Aparición mágica al lanzar
     Future.delayed(const Duration(milliseconds: 300), _iniciarAparicion);
 
@@ -196,6 +239,7 @@ class _AgenteVentanaState extends State<_AgenteVentana>
       final id = _personajePendiente!;
       _personajePendiente = null;
       _personaje = Personaje.obtenerPorId(id);
+      _riveSMCtrl = null; // forzar reinicio de la animación Rive
     }
   }
 
@@ -391,22 +435,243 @@ class _AgenteVentanaState extends State<_AgenteVentana>
     _resetInactividad();
   }
 
-  // ── Voz ───────────────────────────────────────────────────────────────────
+  // ── TTS: verificación de edge-tts ─────────────────────────────────────────
+
+  Future<void> _verificarEdgeTts() async {
+    try {
+      final r = await Process.run('python', ['-m', 'edge_tts', '--version']);
+      _edgeTtsDisponible = r.exitCode == 0;
+    } catch (_) {
+      _edgeTtsDisponible = false;
+    }
+    debugPrint('[TTS] edge-tts: '
+        '${_edgeTtsDisponible! ? "✓ disponible — voz: $_vozId" : "✗ no encontrado, usando SAPI"}');
+  }
+
+  // ── TTS: dispatcher principal ──────────────────────────────────────────────
 
   void _hablar(String texto) {
     final t = _limpiarTexto(texto);
     if (t.isEmpty) return;
-    Process.run('powershell', [
-      '-WindowStyle', 'Hidden', '-Command',
-      'Add-Type -AssemblyName System.Speech; '
-      '\$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; '
-      '\$s.Rate = 1; '
-      '\$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male); '
-      '\$s.Speak("$t");',
-    ]).catchError((e) {
-      debugPrint('[AgenteApp] Error voz: $e');
-      return Process.run('echo', []);
-    });
+
+    if (_edgeTtsDisponible == true) {
+      _hablarEdgeTts(t);
+    } else if (_edgeTtsDisponible == null) {
+      // Todavía verificando: esperar y reintentar
+      _verificarEdgeTts().then((_) { if (mounted) _hablar(texto); });
+    } else {
+      // edge-tts no disponible → SAPI como respaldo
+      _hablarSAPI(t);
+    }
+  }
+
+  // ── TTS: detener voz en curso ─────────────────────────────────────────────
+
+  void _detenerVoz() {
+    try { _procesoVoz?.kill(); } catch (_) {}
+    _procesoVoz = null;
+  }
+
+  // ── TTS: Edge TTS (voz neural de alta calidad) ────────────────────────────
+
+  Future<void> _hablarEdgeTts(String texto) async {
+    _detenerVoz();
+    // Archivo temporal único. Forward-slashes funcionan en Python y PowerShell.
+    final ts       = DateTime.now().millisecondsSinceEpoch;
+    final tempPath = Directory.systemTemp.path.replaceAll('\\', '/') +
+        '/agent_tts_$ts.mp3';
+    final voz = _vozId;
+
+    try {
+      // Todo en un único proceso PowerShell — guardamos el handle para poder matarlo.
+      _procesoVoz = await Process.start('powershell', [
+        '-WindowStyle', 'Hidden',
+        '-NonInteractive',
+        '-Command',
+        'python -m edge_tts '
+            '--voice $voz '
+            '--text "${texto.replaceAll('"', "'")}" '
+            '--write-media "$tempPath"; '
+        'if (Test-Path "$tempPath") { '
+            'Add-Type -AssemblyName PresentationCore; '
+            '\$p = New-Object System.Windows.Media.MediaPlayer; '
+            '\$p.Open([System.Uri]"$tempPath"); '
+            'Start-Sleep -Milliseconds 900; '
+            '\$dur = \$p.NaturalDuration.TimeSpan.TotalSeconds; '
+            '\$wait = if (\$dur -gt 0) { [Math]::Ceiling(\$dur) + 1 } else { 15 }; '
+            '\$p.Play(); '
+            'Start-Sleep -Seconds \$wait; '
+            '\$p.Close(); '
+            'Remove-Item "$tempPath" -ErrorAction SilentlyContinue '
+        '}',
+      ]);
+      await _procesoVoz!.exitCode;
+    } catch (e) {
+      debugPrint('[TTS] Error edge-tts: $e — cambiando a SAPI');
+      _edgeTtsDisponible = false;
+      if (mounted) _hablarSAPI(texto);
+    } finally {
+      _procesoVoz = null;
+    }
+  }
+
+  // ── TTS: SAPI (Windows nativo, respaldo sin internet) ─────────────────────
+
+  Future<void> _hablarSAPI(String texto) async {
+    _detenerVoz();
+    try {
+      _procesoVoz = await Process.start('powershell', [
+        '-WindowStyle', 'Hidden',
+        '-Command',
+        'Add-Type -AssemblyName System.Speech; '
+        '\$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; '
+        '\$s.Rate = 1; '
+        'try { \$s.SelectVoice("Microsoft Sabina Desktop"); } catch { '
+        '  try { \$s.SelectVoice("Microsoft Helena Desktop"); } catch { '
+        '    \$s.SelectVoiceByHints([System.Speech.Synthesis.VoiceGender]::Male) } }; '
+        '\$s.Speak("$texto");',
+      ]);
+      await _procesoVoz!.exitCode;
+    } catch (e) {
+      debugPrint('[TTS] Error SAPI: $e');
+    } finally {
+      _procesoVoz = null;
+    }
+  }
+
+  // ── Selector de voz ────────────────────────────────────────────────────────
+
+  void _mostrarSelectorVoz() {
+    if (_edgeTtsDisponible != true) {
+      // edge-tts no instalado: mostrar instrucciones
+      showDialog<void>(
+        context: context,
+        builder: (_) => Dialog(
+          backgroundColor: const Color(0xFF1E1B4B),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 60),
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(children: [
+                  Icon(Icons.warning_amber_rounded, color: Colors.amber),
+                  SizedBox(width: 8),
+                  Text('edge-tts no instalado',
+                      style: TextStyle(color: Colors.white, fontSize: 15,
+                          fontWeight: FontWeight.bold)),
+                ]),
+                const SizedBox(height: 12),
+                const Text(
+                  'Para usar voces neurales ejecutá:\n\n'
+                  '  pip install edge-tts\n\n'
+                  'Luego reiniciá el agente.',
+                  style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.6),
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Aceptar',
+                        style: TextStyle(color: Color(0xFF7C3AED))),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => Dialog(
+          backgroundColor: const Color(0xFF1E1B4B),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 40),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Row(children: [
+                  Icon(Icons.record_voice_over_rounded, color: Color(0xFF7C3AED)),
+                  SizedBox(width: 8),
+                  Text('Seleccionar voz',
+                      style: TextStyle(color: Colors.white,
+                          fontWeight: FontWeight.bold, fontSize: 16)),
+                ]),
+                const SizedBox(height: 12),
+                ...List.generate(_vozesId.length, (i) {
+                  final activa = i == _vozIndex;
+                  return InkWell(
+                    onTap: () {
+                      setState(() => _vozIndex = i);
+                      setLocal(() {});
+                      Navigator.of(ctx).pop();
+                      Future.delayed(const Duration(milliseconds: 300), () {
+                        if (mounted) _hablar('Listo. Voz activada. A su servicio.');
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(vertical: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: activa
+                            ? const Color(0xFF7C3AED).withValues(alpha: 0.25)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: activa ? const Color(0xFF7C3AED) : Colors.white12,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            activa ? Icons.radio_button_checked : Icons.radio_button_off,
+                            size: 16,
+                            color: activa ? const Color(0xFF7C3AED) : Colors.white38,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _vozesNombre[i],
+                              style: TextStyle(
+                                color: activa ? Colors.white : Colors.white70,
+                                fontWeight: activa ? FontWeight.w600 : FontWeight.normal,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          if (i == 0)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withValues(alpha: 0.2),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: const Text('★ TOP',
+                                style: TextStyle(color: Colors.amber, fontSize: 9,
+                                    fontWeight: FontWeight.bold)),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   String _limpiarTexto(String t) => t
@@ -428,7 +693,7 @@ class _AgenteVentanaState extends State<_AgenteVentana>
 
   Future<void> _cargarPersonaje() async {
     final id = await StorageService.obtenerPersonaje();
-    if (mounted) setState(() => _personaje = Personaje.obtenerPorId(id));
+    if (mounted) setState(() { _personaje = Personaje.obtenerPorId(id); _riveSMCtrl = null; });
   }
 
   @override
@@ -445,6 +710,7 @@ class _AgenteVentanaState extends State<_AgenteVentana>
     _timerParpadeo?.cancel();
     _timerPoll?.cancel();
     _timerInactividad?.cancel();
+    try { _procesoVoz?.kill(); } catch (_) {}
     super.dispose();
   }
 
@@ -596,237 +862,53 @@ class _AgenteVentanaState extends State<_AgenteVentana>
   // PERSONAJE
   // ══════════════════════════════════════════════════════════════════════════
 
+  // ── Rive: inicializar state machine ────────────────────────────────────────
+  void _onRiveInit(Artboard artboard) {
+    if (artboard.stateMachines.isEmpty) return;
+
+    for (final sm in artboard.stateMachines) {
+      debugPrint('[Rive] StateMachine: "${sm.name}"');
+    }
+    final smName = artboard.stateMachines.first.name;
+    final ctrl   = StateMachineController.fromArtboard(artboard, smName);
+    if (ctrl == null) return;
+
+    artboard.addController(ctrl);
+    _riveSMCtrl = ctrl;
+
+    for (final input in ctrl.inputs) {
+      debugPrint('[Rive] Input: "${input.name}" (${input.runtimeType})');
+      final n = input.name.toLowerCase();
+      if (input is SMITrigger) {
+        if (n.contains('wave') || n.contains('hello') || n.contains('salud') ||
+            n.contains('happy') || n.contains('feliz')) {
+          _riveTrigSaludar  = input;
+        } else if (n.contains('sad') || n.contains('angry') || n.contains('confus')) {
+          _riveTrigConfundido = input;
+        } else if (n.contains('excit') || n.contains('joy') || n.contains('love')) {
+          _riveTrigFeliz = input;
+        } else if (n.contains('cry') || n.contains('triste')) {
+          _riveTrigTriste = input;
+        }
+      } else if (input is SMINumber) {
+        if (n.contains('express') || n.contains('state') || n.contains('emotion')) {
+          _riveNumExpresion = input;
+        }
+      }
+    }
+    debugPrint('[Rive] Mapeo → saludo:$_riveTrigSaludar | confundido:$_riveTrigConfundido');
+  }
+
   Widget _buildPersonaje() {
-    final p = _personaje;
     return SizedBox(
-      width: 140,
-      height: 220,
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.topCenter,
-        children: [
-
-          // Sombra
-          Positioned(
-            bottom: 0,
-            child: Container(
-              width: 90, height: 16,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                boxShadow: [BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 18, spreadRadius: 8,
-                )],
-              ),
-            ),
-          ),
-
-          // Piernas
-          Positioned(bottom: 2, left: 42, child: Container(
-            width: 18, height: 44,
-            decoration: BoxDecoration(color: p.pantalon, borderRadius: BorderRadius.circular(9)),
-          )),
-          Positioned(bottom: 2, right: 42, child: Container(
-            width: 18, height: 44,
-            decoration: BoxDecoration(color: p.pantalon, borderRadius: BorderRadius.circular(9)),
-          )),
-
-          // Zapatos
-          Positioned(bottom: 0, left: 38, child: Container(
-            width: 26, height: 12,
-            decoration: BoxDecoration(color: p.zapatos, borderRadius: BorderRadius.circular(6)),
-          )),
-          Positioned(bottom: 0, right: 38, child: Container(
-            width: 26, height: 12,
-            decoration: BoxDecoration(color: p.zapatos, borderRadius: BorderRadius.circular(6)),
-          )),
-
-          // Cuerpo
-          Positioned(
-            bottom: 42,
-            child: AnimatedBuilder(
-              animation: _respAnim,
-              builder: (_, child) => Transform.scale(scaleX: _respAnim.value, child: child),
-              child: Container(
-                width: 72, height: 100,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [p.trajeTop, p.trajeBottom],
-                    begin: Alignment.topCenter, end: Alignment.bottomCenter,
-                  ),
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(10), topRight: Radius.circular(10),
-                    bottomLeft: Radius.circular(6), bottomRight: Radius.circular(6),
-                  ),
-                  boxShadow: [BoxShadow(
-                    color: p.trajeTop.withValues(alpha: 0.45),
-                    blurRadius: 20, spreadRadius: 2, offset: const Offset(0, 8),
-                  )],
-                ),
-                child: Center(child: Container(
-                  width: 10, height: 40,
-                  margin: const EdgeInsets.only(top: 10),
-                  decoration: BoxDecoration(color: p.corbata, borderRadius: BorderRadius.circular(5)),
-                )),
-              ),
-            ),
-          ),
-
-          // ── Brazo izquierdo ──────────────────────────────────────────────
-          // En modo "lector": baja hacia el libro. Normal: cuelga al costado.
-          AnimatedBuilder(
-            animation: _lecAnim,
-            builder: (_, child) {
-              // Rotar brazo izq hacia adelante (ángulo positivo = hacia frente)
-              final angle = _lecAnim.value * 0.5;
-              return Positioned(
-                bottom: 78 - _lecAnim.value * 10, left: 16,
-                child: Transform.rotate(
-                  angle: angle, alignment: Alignment.topCenter,
-                  child: child,
-                ),
-              );
-            },
-            child: Container(
-              width: 18, height: 68,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [p.trajeTop, p.trajeBottom],
-                  begin: Alignment.topCenter, end: Alignment.bottomCenter),
-                borderRadius: BorderRadius.circular(9),
-              ),
-            ),
-          ),
-
-          // ── Brazo derecho ────────────────────────────────────────────────
-          // Saludo OU rascar cabeza OU lector (hacia libro)
-          AnimatedBuilder(
-            animation: Listenable.merge([_saludarAnim, _rascaAnim, _lecAnim]),
-            builder: (_, child) {
-              double angle;
-              double bottom;
-              if (_rascando) {
-                // Brazo sube a la cabeza: rota hacia atrás/arriba
-                angle  = -(_rascaAnim.value * 1.2);
-                bottom = 100 + _rascaAnim.value * 40;
-              } else if (_leyendo) {
-                // Hacia el libro (igual que el izquierdo)
-                angle  = _lecAnim.value * 0.5;
-                bottom = 78 - (_lecAnim.value * 10).round().toDouble();
-              } else {
-                // Saludo normal
-                angle  = -_saludarAnim.value;
-                bottom = 100;
-              }
-              return Positioned(
-                bottom: bottom, right: 16,
-                child: Transform.rotate(
-                  angle: angle, alignment: Alignment.topCenter,
-                  child: child,
-                ),
-              );
-            },
-            child: Container(
-              width: 18, height: 68,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(colors: [p.trajeTop, p.trajeBottom],
-                  begin: Alignment.topCenter, end: Alignment.bottomCenter),
-                borderRadius: BorderRadius.circular(9),
-              ),
-            ),
-          ),
-
-          // Mano derecha (saludo)
-          AnimatedBuilder(
-            animation: _saludarAnim,
-            builder: (_, child) {
-              if (_rascando || _leyendo) return const SizedBox.shrink();
-              final opacity = (_saludarAnim.value / 0.65).clamp(0.0, 1.0);
-              return Positioned(
-                bottom: 160, right: 8,
-                child: Opacity(opacity: opacity, child: child),
-              );
-            },
-            child: Container(
-              width: 20, height: 20,
-              decoration: BoxDecoration(color: p.piel, shape: BoxShape.circle),
-            ),
-          ),
-
-          // ── Libro (lector distraído) ────────────────────────────────────
-          AnimatedBuilder(
-            animation: _lecAnim,
-            builder: (_, __) {
-              if (_lecAnim.value < 0.05) return const SizedBox.shrink();
-              return Positioned(
-                bottom: 55, left: 40,
-                child: Opacity(
-                  opacity: _lecAnim.value,
-                  child: _buildLibro(p),
-                ),
-              );
-            },
-          ),
-
-          // Cuello
-          Positioned(bottom: 140, child: Container(width: 24, height: 20, color: p.piel)),
-
-          // ── Cabeza ───────────────────────────────────────────────────────
-          Positioned(
-            top: 0,
-            child: AnimatedBuilder(
-              animation: Listenable.merge([_lecAnim, _rascaAnim]),
-              builder: (_, child) {
-                // En modo lector: inclinar cabeza hacia abajo
-                // En rascar: leve inclinación lateral
-                double angle = 0;
-                if (_leyendo)   angle =  _lecAnim.value * 0.25;
-                if (_rascando)  angle = -_rascaAnim.value * 0.12;
-                return Transform.rotate(angle: angle, child: child);
-              },
-              child: Container(
-                width: 84, height: 84,
-                decoration: BoxDecoration(
-                  color: p.piel, shape: BoxShape.circle,
-                  boxShadow: [BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.18),
-                    blurRadius: 12, offset: const Offset(0, 5),
-                  )],
-                ),
-                child: _buildCara(),
-              ),
-            ),
-          ),
-
-          // Cabello
-          Positioned(
-            top: 0,
-            child: AnimatedBuilder(
-              animation: _rascaAnim,
-              builder: (_, child) {
-                // Sombrero/cabello se desplaza levemente al rascar
-                final offsetX = _rascaAnim.value * 6;
-                final offsetY = -_rascaAnim.value * 4;
-                return Transform.translate(offset: Offset(offsetX, offsetY), child: child);
-              },
-              child: ClipOval(
-                child: SizedBox(
-                  width: 84, height: 84,
-                  child: Align(
-                    alignment: Alignment.topCenter,
-                    child: Container(
-                      width: 84, height: 40,
-                      decoration: BoxDecoration(
-                        color: p.pelo,
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(42), topRight: Radius.circular(42)),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
+      width: 200,
+      height: 240,
+      child: RiveAnimation.asset(
+        _riveAsset,
+        key: ValueKey('${_personaje.id}_rive'),
+        artboard: _personaje.riveArtboard,
+        fit: BoxFit.contain,
+        onInit: _onRiveInit,
       ),
     );
   }
@@ -867,68 +949,6 @@ class _AgenteVentanaState extends State<_AgenteVentana>
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildCara() {
-    final p = _personaje;
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        const SizedBox(height: 20),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [_buildOjo(), const SizedBox(width: 16), _buildOjo()],
-        ),
-        const SizedBox(height: 7),
-        // Boca: sonrisa normal ↔ círculo bostezando
-        AnimatedBuilder(
-          animation: _bostezAnim,
-          builder: (_, __) {
-            final bostez = _bostezAnim.value;
-            if (bostez > 0.1) {
-              // Boca abierta (óvalo)
-              return Container(
-                width:  16 + bostez * 8,
-                height:  8 + bostez * 14,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1A0A00),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: p.sonrisa, width: 1.5),
-                ),
-              );
-            }
-            // Sonrisa normal
-            return Container(
-              width: 24, height: 11,
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(color: p.sonrisa, width: 2.5),
-                  left:   BorderSide(color: p.sonrisa, width: 2.5),
-                  right:  BorderSide(color: p.sonrisa, width: 2.5),
-                ),
-                borderRadius: const BorderRadius.only(
-                  bottomLeft: Radius.circular(12), bottomRight: Radius.circular(12)),
-              ),
-            );
-          },
-        ),
-      ],
-    );
-  }
-
-  Widget _buildOjo() {
-    // En bostezador: ojos semicerrados
-    final alturaOjo = _bostezando
-        ? (_bostezAnim.value > 0.3 ? 3.0 : 10.0)
-        : (_ojosCerrados ? 2.0 : 10.0);
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 100),
-      width: 10, height: alturaOjo,
-      decoration: BoxDecoration(
-        color: _personaje.ojos,
-        borderRadius: BorderRadius.circular(5),
       ),
     );
   }
@@ -1022,6 +1042,61 @@ class _AgenteVentanaState extends State<_AgenteVentana>
           onTap: () => Future.delayed(
             const Duration(milliseconds: 200), _iniciarRascarCabeza),
         ),
+        // ── Voz ──────────────────────────────────────────────────────────
+        PopupMenuItem(
+          value: 'voz',
+          child: Row(
+            children: [
+              Icon(
+                Icons.record_voice_over_rounded,
+                size: 18,
+                color: _edgeTtsDisponible == true
+                    ? const Color(0xFF00E5FF)
+                    : Colors.white38,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Cambiar voz',
+                        style: TextStyle(color: Colors.white, fontSize: 13)),
+                    Text(
+                      _edgeTtsDisponible == true ? _vozNombre : 'SAPI (instalar edge-tts)',
+                      style: const TextStyle(color: Colors.white38, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right_rounded,
+                  size: 16, color: Colors.white38),
+            ],
+          ),
+          onTap: () => Future.delayed(
+              const Duration(milliseconds: 200), _mostrarSelectorVoz),
+        ),
+        // ── Personaje Rive ────────────────────────────────────────────────
+        PopupMenuItem(
+          value: 'personaje',
+          child: Row(children: [
+            const Icon(Icons.face_rounded, size: 18, color: Color(0xFF7C3AED)),
+            const SizedBox(width: 10),
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('Cambiar personaje',
+                    style: TextStyle(color: Colors.white, fontSize: 13)),
+                Text(_personaje.nombre,
+                    style: const TextStyle(color: Colors.white38, fontSize: 10)),
+              ],
+            )),
+            const Icon(Icons.chevron_right_rounded, size: 16, color: Colors.white38),
+          ]),
+          onTap: () => Future.delayed(
+              const Duration(milliseconds: 200), _abrirAppPrincipal),
+        ),
         const PopupMenuDivider(),
         PopupMenuItem(
           value: 'cerrar',
@@ -1036,6 +1111,7 @@ class _AgenteVentanaState extends State<_AgenteVentana>
       ],
     );
   }
+
 
   Future<void> _abrirAppPrincipal() async {
     try {
@@ -1122,4 +1198,340 @@ class _ColaPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ColaPainter old) => old.color != color;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PAINTERS DEL PERSONAJE — Opción 2: formas orgánicas con curvas Bézier
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Pierna con ligero degradado y costura central
+class _PiernaPainter extends CustomPainter {
+  final Personaje p;
+  _PiernaPainter(this.p);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width; final h = size.height;
+    final path = Path()
+      ..moveTo(1, 0)..lineTo(w - 1, 0)
+      ..lineTo(w - 2, h)..lineTo(2, h)..close();
+    canvas.drawPath(path, Paint()..shader = LinearGradient(
+      colors: [p.pantalon, Color.lerp(p.pantalon, Colors.black, 0.22)!],
+      begin: Alignment.topLeft, end: Alignment.bottomRight,
+    ).createShader(Rect.fromLTWH(0, 0, w, h)));
+    canvas.drawLine(Offset(w / 2, 3), Offset(w / 2, h - 4),
+        Paint()..color = Colors.black.withValues(alpha: 0.10)
+               ..strokeWidth = 1.0..style = PaintingStyle.stroke);
+  }
+  @override bool shouldRepaint(_PiernaPainter old) => old.p != p;
+}
+
+/// Zapato con punta redondeada, suela y reflejo
+class _ZapatoPainter extends CustomPainter {
+  final Personaje p;
+  _ZapatoPainter(this.p);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width; final h = size.height;
+    final path = Path()
+      ..moveTo(4, 0)..lineTo(w - 10, 0)
+      ..quadraticBezierTo(w - 1, 0, w - 1, h * 0.5)
+      ..quadraticBezierTo(w - 1, h, w - 5, h)
+      ..lineTo(3, h)
+      ..quadraticBezierTo(0, h, 0, h * 0.5)
+      ..quadraticBezierTo(0, 0, 4, 0)..close();
+    canvas.drawPath(path, Paint()..color = p.zapatos);
+    canvas.drawLine(Offset(2, h - 2), Offset(w - 3, h - 2),
+        Paint()..color = Colors.black.withValues(alpha: 0.30)
+               ..strokeWidth = 1.5..style = PaintingStyle.stroke);
+    canvas.drawLine(Offset(w * 0.2, 3), Offset(w * 0.6, 3),
+        Paint()..color = Colors.white.withValues(alpha: 0.20)
+               ..strokeWidth = 1.5..strokeCap = StrokeCap.round
+               ..style = PaintingStyle.stroke);
+  }
+  @override bool shouldRepaint(_ZapatoPainter old) => old.p != p;
+}
+
+/// Chaqueta/torso con solapas en V, corbata con nudo y costuras de hombro
+class _TorsoPainter extends CustomPainter {
+  final Personaje p;
+  _TorsoPainter(this.p);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width; final h = size.height;
+    final cx = w / 2;
+
+    // ── Chaqueta principal ────────────────────────────────────────────────
+    final suitPath = Path();
+    suitPath.moveTo(cx - 16, 0);
+    suitPath.cubicTo(cx - 30, 0, cx - 54, 10, cx - 52, 24);
+    suitPath.lineTo(cx - 40, h);
+    suitPath.lineTo(cx + 40, h);
+    suitPath.lineTo(cx + 52, 24);
+    suitPath.cubicTo(cx + 54, 10, cx + 30, 0, cx + 16, 0);
+    suitPath.lineTo(cx + 8, 68);
+    suitPath.lineTo(cx, 48);
+    suitPath.lineTo(cx - 8, 68);
+    suitPath.close();
+    canvas.drawPath(suitPath, Paint()..shader = LinearGradient(
+      colors: [p.trajeTop, p.trajeBottom],
+      begin: Alignment.topCenter, end: Alignment.bottomCenter,
+    ).createShader(Rect.fromLTWH(0, 0, w, h)));
+
+    // ── Camisa visible (triángulo blanco entre solapas) ───────────────────
+    canvas.drawPath(
+      Path()
+        ..moveTo(cx - 16, 0)..lineTo(cx - 8, 68)
+        ..lineTo(cx, 48)..lineTo(cx + 8, 68)
+        ..lineTo(cx + 16, 0)..close(),
+      Paint()..color = Colors.white.withValues(alpha: 0.88),
+    );
+
+    // ── Solapas con highlight ─────────────────────────────────────────────
+    final lapelColor = Color.lerp(p.trajeTop, Colors.white, 0.13)!;
+    canvas.drawPath(
+      Path()..moveTo(cx - 16, 0)..lineTo(cx - 8, 68)
+            ..lineTo(cx - 28, 54)..lineTo(cx - 32, 10)..close(),
+      Paint()..color = lapelColor,
+    );
+    canvas.drawPath(
+      Path()..moveTo(cx + 16, 0)..lineTo(cx + 8, 68)
+            ..lineTo(cx + 28, 54)..lineTo(cx + 32, 10)..close(),
+      Paint()..color = lapelColor,
+    );
+
+    // ── Nudo de corbata ───────────────────────────────────────────────────
+    canvas.drawPath(
+      Path()
+        ..moveTo(cx - 5, 44)
+        ..quadraticBezierTo(cx, 40, cx + 5, 44)
+        ..quadraticBezierTo(cx + 6, 52, cx, 54)
+        ..quadraticBezierTo(cx - 6, 52, cx - 5, 44)..close(),
+      Paint()..color = p.corbata,
+    );
+
+    // ── Cuerpo de la corbata ──────────────────────────────────────────────
+    canvas.drawPath(
+      Path()
+        ..moveTo(cx - 4, 53)..lineTo(cx - 7, h * 0.72)
+        ..lineTo(cx, h * 0.88)..lineTo(cx + 7, h * 0.72)
+        ..lineTo(cx + 4, 53)..close(),
+      Paint()..color = p.corbata,
+    );
+    // Brillo diagonal
+    canvas.drawLine(Offset(cx - 1, 58), Offset(cx - 3, h * 0.70),
+        Paint()..color = Colors.white.withValues(alpha: 0.22)
+               ..strokeWidth = 2.0..style = PaintingStyle.stroke);
+
+    // ── Botón ─────────────────────────────────────────────────────────────
+    canvas.drawCircle(Offset(cx, h * 0.58), 3.5,
+        Paint()..color = p.corbata.withValues(alpha: 0.65));
+
+    // ── Costuras de hombro ────────────────────────────────────────────────
+    final seam = Paint()..color = Colors.black.withValues(alpha: 0.13)
+        ..strokeWidth = 1.0..style = PaintingStyle.stroke;
+    canvas.drawLine(Offset(cx - 52, 24), Offset(cx - 30, 6), seam);
+    canvas.drawLine(Offset(cx + 52, 24), Offset(cx + 30, 6), seam);
+
+    // ── Sombra lateral ────────────────────────────────────────────────────
+    canvas.drawRect(Rect.fromLTWH(0, 0, w, h), Paint()..shader = LinearGradient(
+      colors: [Colors.black.withValues(alpha: 0.07), Colors.transparent,
+               Colors.black.withValues(alpha: 0.07)],
+      stops: const [0.0, 0.5, 1.0],
+    ).createShader(Rect.fromLTWH(0, 0, w, h)));
+  }
+  @override bool shouldRepaint(_TorsoPainter old) => old.p != p;
+}
+
+/// Brazo cónico con puño de camisa visible en la muñeca
+class _BrazoPainter extends CustomPainter {
+  final Personaje p;
+  _BrazoPainter(this.p);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width; final h = size.height;
+    final path = Path()
+      ..moveTo(2, 0)..lineTo(w - 2, 0)
+      ..quadraticBezierTo(w, 2, w - 2, h * 0.5)
+      ..lineTo(w - 4, h)..lineTo(4, h)
+      ..lineTo(2, h * 0.5)
+      ..quadraticBezierTo(0, 2, 2, 0)..close();
+    canvas.drawPath(path, Paint()..shader = LinearGradient(
+      colors: [p.trajeTop, Color.lerp(p.trajeTop, Colors.black, 0.28)!],
+      begin: Alignment.topLeft, end: Alignment.bottomRight,
+    ).createShader(Rect.fromLTWH(0, 0, w, h)));
+    // Puño de camisa
+    canvas.drawRect(Rect.fromLTWH(3, h - 11, w - 6, 9),
+        Paint()..color = Colors.white.withValues(alpha: 0.62));
+    canvas.drawRect(Rect.fromLTWH(3, h - 11, w - 6, 9),
+        Paint()..color = Colors.black.withValues(alpha: 0.08)
+               ..style = PaintingStyle.stroke..strokeWidth = 0.8);
+  }
+  @override bool shouldRepaint(_BrazoPainter old) => old.p != p;
+}
+
+/// Mano con palma + 3 dedos + pulgar
+class _ManoPainter extends CustomPainter {
+  final Color color;
+  _ManoPainter(this.color);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width; final h = size.height;
+    final paint = Paint()..color = color;
+    canvas.drawOval(Rect.fromCenter(center: Offset(w / 2, h * 0.62),
+        width: w * 0.78, height: h * 0.62), paint);
+    for (int i = 0; i < 3; i++) {
+      canvas.drawOval(Rect.fromCenter(
+          center: Offset(w * 0.22 + i * w * 0.28, h * 0.30),
+          width: w * 0.24, height: h * 0.38), paint);
+    }
+    canvas.drawOval(Rect.fromCenter(center: Offset(w * 0.06, h * 0.55),
+        width: w * 0.22, height: h * 0.30), paint);
+  }
+  @override bool shouldRepaint(_ManoPainter old) => old.color != color;
+}
+
+/// Cabeza completa: orejas, pelo, cejas, ojos con destellos, nariz, boca animada
+class _CabezaPainter extends CustomPainter {
+  final Personaje personaje;
+  final bool   ojosCerrados;
+  final double bostezApertura;
+  final bool   bostezando;
+  final double rascaValue;
+
+  const _CabezaPainter({
+    required this.personaje,
+    required this.ojosCerrados,
+    required this.bostezApertura,
+    required this.bostezando,
+    required this.rascaValue,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2; // 70
+    const cy = 50.0;
+    const rx = 40.0;
+    const ry = 46.0;
+    final p = personaje;
+
+    // ── Orejas ──────────────────────────────────────────────────────────────
+    final earPaint      = Paint()..color = p.piel;
+    final innerEarPaint = Paint()..color = Color.lerp(p.piel, Colors.redAccent, 0.18)!;
+    canvas.drawOval(Rect.fromCenter(
+        center: Offset(cx - rx + 3, cy + 6), width: 15, height: 22), earPaint);
+    canvas.drawOval(Rect.fromCenter(
+        center: Offset(cx - rx + 4, cy + 6), width:  8, height: 14), innerEarPaint);
+    canvas.drawOval(Rect.fromCenter(
+        center: Offset(cx + rx - 3, cy + 6), width: 15, height: 22), earPaint);
+    canvas.drawOval(Rect.fromCenter(
+        center: Offset(cx + rx - 4, cy + 6), width:  8, height: 14), innerEarPaint);
+
+    // ── Base de la cabeza ────────────────────────────────────────────────────
+    canvas.drawOval(
+      Rect.fromCenter(center: Offset(cx, cy), width: rx * 2, height: ry * 2),
+      Paint()..color = p.piel,
+    );
+    // Reflejo sutil
+    canvas.drawOval(
+      Rect.fromCenter(center: Offset(cx + 7, cy - 10), width: rx * 1.2, height: ry * 0.9),
+      Paint()..color = Colors.white.withValues(alpha: 0.07),
+    );
+
+    // ── Cabello (clipeado al óvalo, se desplaza al rascar) ────────────────────
+    canvas.save();
+    canvas.clipPath(Path()..addOval(
+        Rect.fromCenter(center: Offset(cx, cy), width: rx * 2, height: ry * 2)));
+    canvas.translate(rascaValue * 5, -rascaValue * 3);
+    canvas.drawOval(
+      Rect.fromCenter(center: Offset(cx, cy - ry * 0.32), width: rx * 2.1, height: ry * 1.4),
+      Paint()..color = p.pelo,
+    );
+    canvas.restore();
+
+    // ── Cejas ────────────────────────────────────────────────────────────────
+    final browPaint = Paint()
+      ..color = Color.lerp(p.pelo, Colors.black, 0.35)!
+      ..strokeWidth = 2.8..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+    canvas.drawPath(Path()
+        ..moveTo(cx - 24, cy + 4)
+        ..quadraticBezierTo(cx - 15, cy - 1, cx - 6, cy + 4), browPaint);
+    canvas.drawPath(Path()
+        ..moveTo(cx + 6, cy + 4)
+        ..quadraticBezierTo(cx + 15, cy - 1, cx + 24, cy + 4), browPaint);
+
+    // ── Ojos ────────────────────────────────────────────────────────────────
+    final eyeH = bostezando
+        ? (bostezApertura > 0.3 ? 3.0 : 10.0)
+        : (ojosCerrados ? 2.0 : 10.0);
+    const eyeY = cy + 16.0;
+
+    if (eyeH > 4) {
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx - 15, eyeY),
+          width: 16, height: eyeH + 4), Paint()..color = Colors.white);
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx + 15, eyeY),
+          width: 16, height: eyeH + 4), Paint()..color = Colors.white);
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx - 15, eyeY + 1),
+          width: 9, height: eyeH), Paint()..color = p.ojos);
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx + 15, eyeY + 1),
+          width: 9, height: eyeH), Paint()..color = p.ojos);
+      // Destellos
+      final glint = Paint()..color = Colors.white.withValues(alpha: 0.92);
+      canvas.drawCircle(Offset(cx - 12, eyeY - 2), 2.2, glint);
+      canvas.drawCircle(Offset(cx + 18, eyeY - 2), 2.2, glint);
+    } else {
+      // Ojos cerrados: curva suave
+      final closed = Paint()..color = p.ojos..strokeWidth = 2.2
+          ..strokeCap = StrokeCap.round..style = PaintingStyle.stroke;
+      canvas.drawPath(Path()
+          ..moveTo(cx - 21, eyeY)
+          ..quadraticBezierTo(cx - 15, eyeY + 3, cx - 9, eyeY), closed);
+      canvas.drawPath(Path()
+          ..moveTo(cx + 9, eyeY)
+          ..quadraticBezierTo(cx + 15, eyeY + 3, cx + 21, eyeY), closed);
+    }
+
+    // ── Nariz ────────────────────────────────────────────────────────────────
+    canvas.drawPath(Path()
+        ..moveTo(cx - 3, cy + 26)
+        ..quadraticBezierTo(cx, cy + 31, cx + 3, cy + 26),
+      Paint()..color = Color.lerp(p.piel, Colors.brown, 0.30)!
+             ..strokeWidth = 1.6..strokeCap = StrokeCap.round
+             ..style = PaintingStyle.stroke,
+    );
+
+    // ── Boca ─────────────────────────────────────────────────────────────────
+    if (bostezApertura > 0.1) {
+      canvas.drawOval(
+        Rect.fromCenter(center: Offset(cx, cy + 38),
+            width: 12 + bostezApertura * 10, height: 6 + bostezApertura * 16),
+        Paint()..color = const Color(0xFF1A0A00),
+      );
+      canvas.drawOval(
+        Rect.fromCenter(center: Offset(cx, cy + 38),
+            width: 12 + bostezApertura * 10, height: 6 + bostezApertura * 16),
+        Paint()..color = p.sonrisa..strokeWidth = 1.5..style = PaintingStyle.stroke,
+      );
+    } else {
+      canvas.drawPath(
+        Path()..moveTo(cx - 12, cy + 34)
+              ..quadraticBezierTo(cx, cy + 44, cx + 12, cy + 34),
+        Paint()..color = p.sonrisa..strokeWidth = 2.6
+               ..strokeCap = StrokeCap.round..style = PaintingStyle.stroke,
+      );
+      // Rubor en mejillas
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx - 24, cy + 30),
+          width: 16, height: 8), Paint()..color = Colors.pink.withValues(alpha: 0.14));
+      canvas.drawOval(Rect.fromCenter(center: Offset(cx + 24, cy + 30),
+          width: 16, height: 8), Paint()..color = Colors.pink.withValues(alpha: 0.14));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_CabezaPainter old) =>
+      old.personaje != personaje ||
+      old.ojosCerrados != ojosCerrados ||
+      old.bostezApertura != bostezApertura ||
+      old.bostezando != bostezando ||
+      old.rascaValue != rascaValue;
 }

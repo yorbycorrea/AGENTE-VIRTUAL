@@ -1,0 +1,1 @@
+Add-Type -AssemblyName PresentationCore; $pl = New-Object System.Windows.Media.MediaPlayer; $pl.Open([System.Uri]"C:\Users\yorby\AppData\Local\Temp\test_jarvis.mp3"); Start-Sleep -Milliseconds 900; $dur = $pl.NaturalDuration.TimeSpan.TotalSeconds; $wait = if ($dur -gt 0) { [Math]::Ceiling($dur) + 1 } else { 8 }; $pl.Play(); Start-Sleep -Seconds $wait; $pl.Close()
